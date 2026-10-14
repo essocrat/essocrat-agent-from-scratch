@@ -1,17 +1,15 @@
 """
-Run the Gemini version of the agent. Free tier — no billing needed.
+Run the Gemini version of the agent (free tier).
 
 Setup:
-    1. Get a free key: https://aistudio.google.com/apikey
-    2. Put it in .env as GOOGLE_API_KEY=your-key
-    3. pip install google-generativeai
+    1. Free key: https://aistudio.google.com/apikey
+    2. set GOOGLE_API_KEY=your-key      (Windows)
+    3. pip install google-genai
     4. python main_gemini.py "your question"
 """
 
 import os
 import sys
-
-import google.generativeai as genai
 
 from agent.agent_gemini import GeminiAgent
 
@@ -33,14 +31,12 @@ def main():
     if not api_key:
         print("Error: set GOOGLE_API_KEY in your environment (see .env).")
         sys.exit(1)
-    genai.configure(api_key=api_key)
 
-    agent = GeminiAgent(system_prompt=SYSTEM_PROMPT, on_event=log_event)
+    agent = GeminiAgent(system_prompt=SYSTEM_PROMPT, api_key=api_key, on_event=log_event)
 
     if len(sys.argv) > 1:
         question = " ".join(sys.argv[1:])
-        answer = agent.run(question)
-        print(f"\nAgent: {answer}")
+        print(f"\nAgent: {agent.run(question)}")
         return
 
     print("Agent ready (Gemini free tier). Type 'exit' to quit.\n")
@@ -48,8 +44,7 @@ def main():
         user_input = input("You: ")
         if user_input.strip().lower() in {"exit", "quit"}:
             break
-        answer = agent.run(user_input)
-        print(f"Agent: {answer}\n")
+        print(f"Agent: {agent.run(user_input)}\n")
 
 
 if __name__ == "__main__":

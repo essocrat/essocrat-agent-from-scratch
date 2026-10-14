@@ -1,80 +1,93 @@
 """
-Same agent loop as agent.py, but using Google's Gemini API instead of
-Anthropic's — because Gemini has a genuinely free tier, good for learning
-without spending money. The core loop logic is identical: this is the
-point. Only the API calls and response format differ.
+Same agent loop as before, now on Google's NEW SDK (google-genai).
+
+Why the switch: Gemini 3 models attach a hidden "thought signature" to every
+tool request, and it must be sent back with the tool result. The old
+google.generativeai package drops it (causing a 400 error); this SDK keeps it
+as long as we store the model's reply exactly as it came back.
 """
 
 import time
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from agent.tools import TOOL_SCHEMAS, TOOL_FUNCTIONS
 
-MODEL = "gemini-3.8-flash"
+MODEL = "gemini-3.5-flash-lite"
 MAX_TURNS = 8
 
 
 def _to_gemini_tools():
-    """Convert our tool schemas (Anthropic-style) into Gemini's format."""
-    declarations = []
-    for schema in TOOL_SCHEMAS:
-        declarations.append({
-            "name": schema["name"],
-            "description": schema["description"],
-            "parameters": schema["input_schema"],
-        })
-    return [{"function_declarations": declarations}]
+    """Convert our tool schemas into Gemini's format."""
+    declarations = [
+        {
+            "name": s["name"],
+            "description": s["description"],
+            "parameters": s["input_schema"],
+        }
+        for s in TOOL_SCHEMAS
+    ]
+    return [types.Tool(function_declarations=declarations)]
 
 
 class GeminiAgent:
-    def __init__(self, system_prompt: str, on_event=None):
-        self.model = genai.GenerativeModel(
-            model_name=MODEL,
+    def __init__(self, system_prompt: str, api_key: str | None = None, on_event=None):
+        self.client = genai.Client(api_key=api_key)
+        self.config = types.GenerateContentConfig(
             system_instruction=system_prompt,
             tools=_to_gemini_tools(),
         )
-        self.chat = self.model.start_chat()
+        self.contents = []  # the whole conversation, kept by us
         self.on_event = on_event or (lambda event, data: None)
 
     def run(self, user_input: str) -> str:
         self.on_event("user_message", {"content": user_input})
-        message = user_input
+        self.contents.append(
+            types.Content(role="user", parts=[types.Part(text=user_input)])
+        )
 
         for turn in range(MAX_TURNS):
             start = time.time()
-            response = self.chat.send_message(message)
+            response = self.client.models.generate_content(
+                model=MODEL,
+                contents=self.contents,
+                config=self.config,
+            )
             latency = time.time() - start
 
-            part = response.candidates[0].content.parts[0]
-            has_function_call = hasattr(part, "function_call") and part.function_call.name
-
+            calls = response.function_calls or []
             self.on_event("llm_response", {
                 "turn": turn,
                 "latency_s": round(latency, 2),
-                "has_tool_call": bool(has_function_call),
+                "has_tool_call": bool(calls),
             })
 
-            if not has_function_call:
+            # Save the model's reply EXACTLY as received (keeps thought signatures)
+            self.contents.append(response.candidates[0].content)
+
+            if not calls:
                 return response.text
 
-            fn_call = part.function_call
-            result = self._execute_tool(fn_call.name, dict(fn_call.args))
-            self.on_event("tool_call", {
-                "name": fn_call.name,
-                "input": dict(fn_call.args),
-                "result": result,
-            })
-
-            # Feed the tool result back as the next message
-            message = genai.protos.Content(
-                parts=[genai.protos.Part(
-                    function_response=genai.protos.FunctionResponse(
-                        name=fn_call.name,
+            # Run each requested tool and collect the results
+            result_parts = []
+            for call in calls:
+                args = dict(call.args or {})
+                result = self._execute_tool(call.name, args)
+                self.on_event("tool_call", {
+                    "name": call.name,
+                    "input": args,
+                    "result": result,
+                })
+                result_parts.append(
+                    types.Part.from_function_response(
+                        name=call.name,
                         response={"result": result},
                     )
-                )]
-            )
+                )
+
+            # Send the results back as the next turn
+            self.contents.append(types.Content(role="user", parts=result_parts))
 
         return "Stopped: hit MAX_TURNS without a final answer. Possible loop."
 
